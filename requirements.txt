@@ -1,0 +1,9 @@
+streamlit
+scikit-learn
+pandas
+nltk
+matplotlib
+seaborn
+numpy
+tqdm
+kagglehub
