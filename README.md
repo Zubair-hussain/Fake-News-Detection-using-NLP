@@ -1,85 +1,118 @@
 #  Fake News Detection using NLP & Machine Learning
 
 ##  Overview
-This project aims to develop a machine learning model that accurately classifies news articles as *Fake* or *Real* using Natural Language Processing techniques.
+This project builds a machine learning system to classify news articles as **Fake** or **Real** using Natural Language Processing techniques and classical ML algorithms.
+
+---
 
 ##  Goal
-To detect and classify fake news from a dataset of ~40,000 labeled news articles.
+To detect and classify fake news using the **WELFake Dataset**, and deploy a lightweight, interactive **Streamlit app** for real-time prediction.
 
 ---
 
 ##  Dataset
-- Source: [Kaggle - Fake and Real News Dataset](https://www.kaggle.com/clmentbisaillon/fake-and-real-news-dataset)
-- Contains:
-  - `text`, `title`, `subject`, `date`
-  - Labels: `0 = Fake`, `1 = Real`
+- **Source**: [Kaggle - WELFake Dataset](https://www.kaggle.com/datasets/saurabhshahane/fake-news-classification)
+- **Contents**:
+  - `text` (news content)
+  - `label`: `0 = Fake`, `1 = Real`
+  - ~72,000 labeled news samples
 
 ---
 
 ##  Process
-1. **Data Cleaning & Preprocessing**
-   - Lowercasing, punctuation removal, stopword removal
-   - Lemmatization using NLTK
-2. **TF-IDF Vectorization**
-   - Transformed clean text into 1000-dimensional TF-IDF features
+
+1. **Data Preprocessing**
+   - Lowercasing
+   - Punctuation removal
+   - Stopword removal
+   - Stemming (Porter Stemmer via NLTK)
+
+2. **Feature Extraction**
+   - TF-IDF Vectorization (Top 1000 features for speed)
+
 3. **Model Training**
-   - Trained 3 classical ML models:
-     - Naive Bayes
-     - Logistic Regression
-     - Linear SVM
-4. **Evaluation**
-   - Accuracy, Precision, Recall, F1-Score
-   - Confusion Matrix
+   - Naive Bayes
+   - Logistic Regression
+   - Linear SVM (best performing)
+
+4. **Model Evaluation**
+   - Accuracy, Precision, Recall, F1-score
+   - Confusion Matrix visualization
+   - Final comparison chart
+
+5. **Deployment**
+   - Live Streamlit UI added using saved `.pkl` model and vectorizer
 
 ---
 
 ##  Results
 
-| Model               | Accuracy         |
-|--------------------|------------------|
-| Naive Bayes        | 93.71%           |
-| Logistic Regression| 98.74%           |
-| Linear SVM         | 99.31%  Best   |
+| Model                | Accuracy   |
+|---------------------|------------|
+| Naive Bayes          | 93.71%     |
+| Logistic Regression  | 98.74%     |
+| Linear SVM (Best)    | **99.31%** ✅ |
 
 ---
 
-##  Tools Used
+##  Tools & Libraries Used
+
 - Python
-- NLTK, Scikit-learn
+- NLTK (stopwords, stemming)
+- Scikit-learn
+- Pandas, NumPy
 - Matplotlib, Seaborn
+- Streamlit
 - TF-IDF Vectorizer
-- KaggleHub for dataset access
+- KaggleHub (dataset import)
 
 ---
 
 ##  Learning Outcomes
-- Practical experience with NLP pipelines
-- Training & evaluating classification models
-- Data preprocessing & vectorization
-- Cross-validation of real-world datasets
+
+- Hands-on NLP preprocessing pipeline
+- Comparison of ML classifiers on real-world data
+- Deployment of ML model using Streamlit
+- End-to-end workflow from dataset to interactive UI
 
 ---
 
 ##  Deliverables
-- Jupyter Notebook (.ipynb)
-- README.md (this file)
-- Final Accuracy & Evaluation
-- Optional: Streamlit front-end (not implemented)
+
+-  Full training notebook: `Fake_News_Classification_With_UI.ipynb`
+-  Trained model: `logistic_model.pkl`
+-  TF-IDF Vectorizer: `tfidf_vectorizer.pkl`
+-  Streamlit App: `app.py`
+-  Complete GitHub structure
+-  `requirements.txt` for deployment
 
 ---
 
-##  Future Enhancements
-- Add BERT-based deep learning model
-- Deploy a Streamlit-based fake news detection app
-- Enable live news API classification
+##  Future Improvements
+
+- Add deep learning models (e.g., BERT, LSTM)
+- Improve UI styling (multi-tab layout, article scraping)
+- Enable real-time classification via News API
+
+---
 
 ##  Run the Project
 
->  **Open in Google Colab**:  
-[Click here to launch the notebook](https://colab.research.google.com/drive/1XXdJ86nstgqwbYVO4X1ScLBaiUfpOjNN?usp=sharing)
+> **Launch the Notebook in Colab**  
+[📎 Open in Google Colab](https://colab.research.google.com/drive/1XXdJ86nstgqwbYVO4X1ScLBaiUfpOjNN?usp=sharing)
+
+> **Try the Web App (Streamlit)**  
+ Deploy using Streamlit Cloud by uploading this repo.
 
 ---
 
 ##  License
-This project is shared for educational and research purposes.
+
+This project is shared for educational and demonstration purposes only. Dataset belongs to original Kaggle source.
+
+---
+
+## Tags
+
+`#MachineLearning` `#FakeNewsDetection` `#NLP` `#TFIDF` `#Streamlit` `#ScikitLearn` `#TextClassification` `#WELFake`
 
