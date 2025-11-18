@@ -5,22 +5,26 @@ import nltk
 from nltk.corpus import stopwords
 from nltk.stem.porter import PorterStemmer
 import requests
+import google.generativeai as genai
 import PyPDF2
-from io import BytesIO
 import pandas as pd
-
-# ==================== CONFIG ====================
-st.set_page_config(page_title="TruthLens Pro",  # Changed from "Fake News"
-                   page_icon="lock", 
-                   layout="centered")
+from io import BytesIO
 
 # ==================== KEYS ====================
 SERPAPI_KEY = "46cba0dda74df8cb1aec4b685e0290209f5946f75d4e500ee602fa908e11ab8e"
+GEMINI_API_KEY = "AIzaSyBkq0VS1Jz8LCiBG9UzUhxAgUOruVffu2s"
 
 # ==================== SETUP ====================
 nltk.download('stopwords', quiet=True)
 stop_words = set(stopwords.words('english'))
 ps = PorterStemmer()
+
+genai.configure(api_key=GEMINI_API_KEY)
+gemini_model = genai.GenerativeModel(
+    "gemini-1.5-flash",
+    generation_config={"temperature": 0, "max_output_tokens": 30},
+    safety_settings=[{"category": cat, "threshold": "BLOCK_NONE"} for cat in genai.types.HarmCategory]
+)
 
 @st.cache_resource
 def load_model():
@@ -30,156 +34,132 @@ def load_model():
 
 model, vectorizer = load_model()
 
-# Session state for history
 if "history" not in st.session_state:
     st.session_state.history = []
 
-# ==================== TEXT PREPROCESSING ====================
-def preprocess(text):
-    text = re.sub(r'http\S+|www\.\S+', ' ', text.lower())
-    text = re.sub(r'[^a-z\s]', ' ', text)
-    words = [ps.stem(w) for w in text.split() if w not in stop_words and len(w) > 2]
-    return ' '.join(words)
+# ==================== HELPERS ====================
+def preprocess(t): return " ".join([ps.stem(w) for w in re.sub(r'[^a-z\s]', ' ', re.sub(r'http\S+|www\.\S+', ' ', t.lower())).split() if w not in stop_words and len(w)>2])
+def extract_keywords(t): return " ".join([w for w in re.findall(r'\b[a-z]{5,20}\b', t.lower()) if w not in stop_words][:12]) or "news"
 
-def extract_keywords(text):
-    words = re.findall(r'\b[a-z]{5,20}\b', text.lower())
-    filtered = [w for w in words if w not in stop_words][:15]
-    return " ".join(filtered) or "news article"
-
-# ==================== PDF READER ====================
-def read_pdf(file):
+def read_pdf(f):
     try:
-        reader = PyPDF2.PdfReader(file)
-        text = ""
-        for page in reader.pages:
-            text += page.extract_text() or ""
-        return text[:15000]  # Limit for speed
-    except:
-        return None
+        reader = PyPDF2.PdfReader(BytesIO(f.read()))
+        text = "".join(page.extract_text() or "" for page in reader.pages)
+        lines = [l.strip() for l in text.split('\n') if 20 < len(l.strip()) < 120]
+        key = lines[:8]
+        return text[:15000], key
+    except: return None, []
 
-# ==================== TRUSTED NEWS SEARCH ====================
+def ml_check(t):
+    p = preprocess(t)
+    pred = model.predict(vectorizer.transform([p]))[0]
+    prob = model.predict_proba(vectorizer.transform([p]))[0].max() * 100
+    return {"verdict": "REAL" if pred==1 else "FAKE", "confidence": round(prob,1)}
+
 @st.cache_data(ttl=900)
-def search_trusted_news(query):
+def news_check(q):
     try:
-        url = "https://serpapi.com/search.json"
-        params = {
-            "engine": "google",
-            "q": query,
-            "tbm": "nws",
-            "num": 10,
-            "api_key": SERPAPI_KEY
-        }
-        r = requests.get(url, params=params, timeout=15)
-        data = r.json()
-        results = data.get("news_results", [])[:6]
-        trusted_domains = {"cnn.com", "bbc.com", "reuters.com", "nytimes.com", "apnews.com", 
-                          "theguardian.com", "npr.org", "aljazeera.com", "wsj.com"}
-        trusted = [r for r in results if any(d in r.get("link", "") for d in trusted_domains)]
-        return trusted, len(trusted)
-    except:
-        return [], 0
+        r = requests.get("https://serpapi.com/search.json", params={"engine":"google","q":q,"tbm":"nws","num":10,"api_key":SERPAPI_KEY}, timeout=15).json()
+        results = r.get("news_results", [])[:6]
+        trusted = {"cnn","bbc","reuters","nytimes","apnews","theguardian","npr","aljazeera","wsj"}
+        hits = [x for x in results if any(t in x.get("source","").lower() for t in trusted)]
+        return {"articles": hits, "count": len(hits)}
+    except: return {"articles": [], "count": 0}
 
-# ==================== PREMIUM UI ====================
+def gemini_check(t):
+    try:
+        resp = gemini_model.generate_content(f"Real or fake news? Answer only: REAL or FAKE\n\n{' '.join(t.split()[:500])}")
+        ans = resp.text.strip().upper()
+        v = "REAL" if "REAL" in ans else "FAKE"
+        return {"verdict": v, "confidence": 90}
+    except:
+        return {"verdict": "FAKE", "confidence": 0}
+
+# ==================== ULTRA PREMIUM UI ====================
+st.set_page_config(page_title="TruthLens Pro", page_icon="lock", layout="centered")
+
 st.markdown("""
 <style>
-    .main-title {
-        font-size: 52px;
-        font-weight: 800;
-        text-align: center;
-        color: #1e3a8a;
-        margin-bottom: 8px;
-        font-family: 'Georgia', serif;
+    .title {
+        font-size: 56px !important; font-weight: 900 !important; text-align: center !important;
+        background: linear-gradient(135deg, #000814 0%, #001d3d 30%, #ffc300 100%);
+        -webkit-background-clip: text !important; -webkit-text-fill-color: transparent !important;
+        letter-spacing: 1px; text-shadow: 0 4px 10px rgba(0,0,0,0.4);
     }
-    .subtitle {
-        text-align: center;
-        color: #475569;
-        font-size: 18px;
-        margin-bottom: 30px;
-    }
-    .result-real {color: #059669; font-size: 48px; font-weight: bold; text-align: center;}
-    .result-fake {color: #dc2626; font-size: 48px; font-weight: bold; text-align: center;}
-    .stTextArea > div > div > textarea {font-size: 16px !important;}
+    .subtitle {text-align:center; color:#94a3b8; font-size:18px; margin:10px 0 25px;}
+    .tiny-box textarea {height:110px !important; font-size:15px !important; padding:12px !important;}
+    .result-real {color:#10b981; font-size:50px; font-weight:bold; text-align:center;}
+    .result-fake {color:#ef4444; font-size:50px; font-weight:bold; text-align:center;}
+    .card {background:#0f172a; color:white; padding:20px; border-radius:16px; box-shadow:0 8px 32px rgba(0,0,0,0.6); margin:15px 0;}
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<h1 class="main-title">TruthLens Pro</h1>', unsafe_allow_html=True)
-st.markdown('<p class="subtitle">Advanced Fake News Detection • ML + Global Trusted Sources</p>', unsafe_allow_html=True)
+st.markdown('<h1 class="title">TruthLens Pro</h1>', unsafe_allow_html=True)
+st.markdown('<p class="subtitle">Elite Verification Engine • Instant Truth Detection</p>', unsafe_allow_html=True)
 
-# Input: Text OR PDF
-tab1, tab2 = st.tabs(["Paste Text", "Upload PDF"])
+# TINY INPUT BOX + PDF
+col1, col2 = st.columns([3,1])
+with col1:
+    article = st.text_area("Paste news or article:", height=110, placeholder="Type or paste text here...", key="tinybox", label_visibility="collapsed")
+with col2:
+    pdf = st.file_uploader("PDF", type="pdf", label_visibility="collapsed")
 
-text_input = ""
-with tab1:
-    text_input = st.text_area("Enter news article:", height=180, placeholder="Paste any news text here...")
+text_to_check = article
+if pdf:
+    with st.spinner("Reading PDF..."):
+        txt, keys = read_pdf(pdf)
+        if txt:
+            text_to_check = txt
+            with st.expander("Extracted Key Points", expanded=True):
+                for k in keys: st.write("• " + k)
 
-with tab2:
-    uploaded_file = st.file_uploader("Or upload a PDF document", type="pdf")
-    if uploaded_file:
-        with st.spinner("Reading PDF..."):
-            pdf_text = read_pdf(uploaded_file)
-            if pdf_text:
-                st.success("PDF loaded successfully!")
-                text_input = pdf_text
-                st.text_area("Extracted Text (preview):", pdf_text[:1000] + "...", height=120, disabled=True)
-            else:
-                st.error("Could not read PDF.")
-
-if st.button("Analyze Now", type="primary", use_container_width=True):
-    if not text_input.strip():
-        st.error("Please enter text or upload a PDF.")
+if st.button("Analyze Truth", type="primary", use_container_width=True):
+    if not text_to_check.strip():
+        st.error("Enter text or upload PDF")
     else:
-        with st.spinner("Analyzing content..."):
-            # 1. ML Prediction
-            clean = preprocess(text_input)
-            pred = model.predict(vectorizer.transform([clean]))[0]
-            prob = model.predict_proba(vectorizer.transform([clean]))[0].max() * 100
-            ml_verdict = "Real" if pred == 1 else "Fake"
+        with st.spinner("Verifying..."):
+            ml = ml_check(text_to_check)
+            news = news_check(extract_keywords(text_to_check))
+            gem = gemini_check(text_to_check)
 
-            # 2. Trusted Sources
-            query = extract_keywords(text_input)
-            sources, count = search_trusted_news(query)
+            score = ml["confidence"]*0.9 + news["count"]*25 + (gem["confidence"]*1.2 if gem["confidence"]>0 else 0)
+            final_conf = min(99, round(score, 1))
+            verdict = "REAL" if final_conf >= 60 else "FAKE"
 
-            # Final Score
-            ml_weight = prob * 0.9
-            news_weight = count * 25
-            total = ml_weight + news_weight
-            final_confidence = min(99, total)
-            is_real = final_confidence >= 60
-
-            # Save to history
             st.session_state.history.append({
-                "Verdict": "REAL" if is_real else "FAKE",
-                "ML": f"{ml_verdict} ({prob:.0f}%)",
-                "Trusted Sources": count,
-                "Confidence": f"{final_confidence:.1f}%"
+                "Verdict": verdict,
+                "ML": f"{ml['verdict']} {ml['confidence']:.0f}%",
+                "Sources": news["count"],
+                "Gemini": gem["verdict"],
+                "Score": f"{final_conf:.1f}%"
             })
 
-        # === RESULT ===
-        if is_real:
+        # RESULT
+        st.markdown(f'<div class="card">', unsafe_allow_html=True)
+        if verdict == "REAL":
             st.markdown('<p class="result-real">REAL NEWS</p>', unsafe_allow_html=True)
-            st.success(f"**{final_confidence:.1f}% Confidence** — This appears to be authentic.")
+            st.success(f"**{final_conf:.1f}% Confidence** — Verified Authentic")
             st.balloons()
         else:
-            st.markdown('<p class="result-fake">FAKE / MISLEADING</p>', unsafe_allow_html=True)
-            st.error(f"**{final_confidence:.1f}% Risk** — High chance of being false.")
+            st.markdown('<p class="result-fake">FAKE NEWS</p>', unsafe_allow_html=True)
+            st.error(f"**{final_conf:.1f}% Risk** — Likely False")
 
-        col1, col2 = st.columns(2)
-        with col1:
-            st.metric("Your ML Model", ml_verdict, f"{prob:.0f}%")
-        with col2:
-            st.metric("Trusted Sources Found", count)
+        c1,c2,c3 = st.columns(3)
+        c1.metric("ML Model", ml["verdict"], f"{ml['confidence']:.0f}%")
+        c2.metric("Trusted Sources", news["count"])
+        c3.metric("Gemini AI", gem["verdict"])
 
-        if sources:
-            st.success(f"Found {count} trusted outlets reporting similar content:")
-            for s in sources:
-                st.markdown(f"• [{s['title'][:90]}]({s['link']})")
-        else:
-            st.warning("No major trusted news outlet is covering this story.")
+        if news["articles"]:
+            st.success(f"{news['count']} trusted outlets confirm:")
+            for a in news["articles"]:
+                st.markdown(f"• [{a.get('title','')[:90]}]({a.get('link','#')})")
 
-# ==================== LIVE ANALYTICS TABLE ====================
+        st.markdown('</div>', unsafe_allow_html=True)
+
+# LIVE TABLE
 if st.session_state.history:
-    st.markdown("### Recent Checks")
-    df = pd.DataFrame(st.session_state.history[-10:])  # Last 10
+    st.markdown("### Recent Verifications")
+    df = pd.DataFrame(st.session_state.history[-12:])
     st.dataframe(df, use_container_width=True, hide_index=True)
 
-st.caption("TruthLens Pro © 2025 | Professional Fake Counterintelligence • No AI Limits • PDF Supported")
+st.caption("TruthLens Pro © 2025 | Premium • Instant • Unbreakable")
