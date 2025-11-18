@@ -4,39 +4,55 @@ import re
 import nltk
 from nltk.corpus import stopwords
 from nltk.stem.porter import PorterStemmer
-import spacy
-import google.generativeai as genai
 import requests
+import google.generativeai as genai
+import spacy
+from spacy.cli import download as spacy_download
 
-# ==================== YOUR KEYS (Safe for local + Streamlit Cloud) ====================
-# For local testing (works when you run `streamlit run app.py`)
+# ==================== KEYS (Local + Cloud Safe) ====================
 SERPAPI_KEY = "46cba0dda74df8cb1aec4b685e0290209f5946f75d4e500ee602fa908e11ab8e"
 GEMINI_API_KEY = "AIzaSyAYYFPpYJdBL0HoW2g_hLE2X7UIs1K8Qfg"
 
-# For Streamlit Cloud — automatically overrides the above
+# Override with Streamlit secrets if deployed
 try:
     SERPAPI_KEY = st.secrets["SERPAPI_KEY"]
     GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
 except:
-    pass  # Keep local keys if no secrets
+    pass
 
-# ==================== SETUP ====================
+# ==================== DOWNLOAD & LOAD SPACY MODEL (FIXED!) ====================
+@st.cache_resource
+def load_spacy_model():
+    model_name = "en_core_web_sm"
+    try:
+        return spacy.load(model_name)
+    except OSError:
+        with st.spinner(f"Downloading spaCy model {model_name}... (first run only)"):
+            spacy_download(model_name)
+        return spacy.load(model_name)
+
+nlp = load_spacy_model()
+
+# ==================== NLTK & GEMINI SETUP ====================
 nltk.download('stopwords', quiet=True)
 stop_words = set(stopwords.words('english'))
 ps = PorterStemmer()
-nlp = spacy.load("en_core_web_sm")
 
 genai.configure(api_key=GEMINI_API_KEY)
 gemini_model = genai.GenerativeModel("gemini-1.5-flash")
 
-# ==================== LOAD MODEL ====================
+# ==================== LOAD ML MODEL ====================
 @st.cache_resource
-def load_model():
-    model = pickle.load(open("logistic_model.pkl", "rb"))
-    vectorizer = pickle.load(open("tfidf_vectorizer.pkl", "rb"))
-    return model, vectorizer
+def load_ml_model():
+    try:
+        model = pickle.load(open("logistic_model.pkl", "rb"))
+        vectorizer = pickle.load(open("tfidf_vectorizer.pkl", "rb"))
+        return model, vectorizer
+    except:
+        st.error("Model files not found! Upload logistic_model.pkl and tfidf_vectorizer.pkl")
+        st.stop()
 
-model, vectorizer = load_model()
+model, vectorizer = load_ml_model()
 
 # ==================== PREPROCESSING ====================
 def preprocess(text):
@@ -46,118 +62,104 @@ def preprocess(text):
     words = [ps.stem(w) for w in text.split() if w not in stop_words and len(w) > 2]
     return ' '.join(words)
 
-def extract_key_claim(text):
-    doc = nlp(text[:1200])
+def extract_claim(text):
+    doc = nlp(text[:1000])
     entities = [e.text for e in doc.ents if e.label_ in ["PERSON", "ORG", "GPE", "EVENT", "DATE"]]
-    return " ".join(set(entities[:7])) or "breaking news fact check"
+    claim = " ".join(set(entities[:6]))
+    return claim if len(claim) > 10 else "breaking news fact check"
 
-# ==================== SERPAPI VIA DIRECT API (No serpapi package needed) ====================
+# ==================== SERPAPI DIRECT CALL ====================
 @st.cache_data(ttl=600)
-def check_google_news(query):
+def google_news_search(query):
     url = "https://serpapi.com/search.json"
-    params = {
-        "engine": "google",
-        "q": query,
-        "tbm": "nws",
-        "num": 10,
-        "api_key": SERPAPI_KEY
-    }
+    params = {"engine": "google", "q": query, "tbm": "nws", "num": 10, "api_key": SERPAPI_KEY}
     try:
-        r = requests.get(url, params=params, timeout=12)
+        r = requests.get(url, params=params, timeout=15)
         data = r.json()
         results = data.get("news_results", [])[:5]
-        trusted_domains = ["cnn", "bbc", "nytimes", "reuters", "apnews", "theguardian", "npr"]
-        credible = sum(1 for item in results if any(dom in item.get("source", "").lower() for dom in trusted_domains))
+        trusted = ["cnn", "bbc", "nytimes", "reuters", "apnews", "theguardian", "npr"]
+        credible = sum(1 for r in results if any(t in r.get("source", "").lower() for t in trusted))
         return {"results": results, "credible": credible}
     except:
         return {"results": [], "credible": 0}
 
-# ==================== GEMINI FACT-CHECK ====================
-def gemini_verify(text):
-    prompt = f"""Fact-check this news article. Respond in this exact format:
+# ==================== GEMINI FACT CHECK ====================
+def gemini_check(text):
+    prompt = f"""Fact-check this news article and answer in this exact format:
 
 VERDICT: REAL / FAKE / SATIRE / MISLEADING
-REASON: (max 10 words)
+REASON: (max 12 words)
 
 Article:
-{text[:5000]}"""
-
+{text[:4800]}"""
     try:
         response = gemini_model.generate_content(prompt)
-        text_out = response.text.strip()
+        text = response.text.strip()
         verdict = "UNKNOWN"
-        reason = "Analysis failed"
-        for line in text_out.split("\n"):
+        reason = "No reason"
+        for line in text.split("\n"):
             if "VERDICT:" in line:
                 verdict = line.split("VERDICT:")[1].strip().split()[0]
             if "REASON:" in line:
                 reason = line.split("REASON:")[1].strip()
-        return {"verdict": verdict.upper(), "reason": reason[:70]}
+        return {"verdict": verdict.upper(), "reason": reason[:80]}
     except:
         return {"verdict": "ERROR", "reason": "Gemini unavailable"}
 
-# ==================== STREAMLIT UI ====================
-st.set_page_config(page_title="TruthLens Pro", page_icon="magnifying-glass", layout="centered")
+# ==================== UI ====================
+st.set_page_config(page_title="TruthLens Pro", page_icon="magnifying glass", layout="centered")
 
-st.markdown("<h1 style='text-align: center; color: #1E40AF;'>TruthLens Pro</h1>", unsafe_allow_html=True)
-st.markdown("<p style='text-align: center; font-size: 18px; color: #555;'>Advanced Fake News Detector • ML + Google News + Gemini AI</p>", unsafe_allow_html=True)
+st.markdown("<h1 style='text-align:center; color:#1E40AF; font-size:50px;'>TruthLens Pro</h1>", unsafe_allow_html=True)
+st.markdown("<p style='text-align:center; font-size:20px; color:#555;'>ML + Google News + Gemini AI • Real-Time Fake News Detection</p>", unsafe_allow_html=True)
 st.markdown("---")
 
-user_text = st.text_area("Paste the full news article below:", height=280, placeholder="Enter news content here...")
+article = st.text_area("Paste the full news article here:", height=300)
 
-if st.button("Detect Fake News", type="primary", use_container_width=True):
-    if not user_text.strip():
-        st.error("Please enter a news article.")
+if st.button("Analyze Now", type="primary", use_container_width=True):
+    if not article.strip():
+        st.error("Please paste a news article.")
     else:
-        with st.spinner("Analyzing with 3 powerful layers..."):
-            # 1. ML Model
-            cleaned = preprocess(user_text)
-            vectorized = vectorizer.transform([cleaned])
-            prediction = model.predict(vectorized)[0]
-            probability = model.predict_proba(vectorized)[0].max() * 100
+        with st.spinner("Running 3-layer verification..."):
+            # 1. ML
+            clean = preprocess(article)
+            pred = model.predict(vectorizer.transform([clean]))[0]
+            prob = model.predict_proba(vectorizer.transform([clean]))[0].max() * 100
 
-            # 2. Google News Search
-            claim = extract_key_claim(user_text)
-            news_check = check_google_news(claim)
+            # 2. Google News
+            claim = extract_claim(article)
+            news = google_news_search(claim)
 
-            # 3. Gemini AI
-            gemini_result = gemini_verify(user_text)
+            # 3. Gemini
+            gemini = gemini_check(article)
 
-            # Final Confidence Score
+            # Final Score
             score = 0
-            if prediction == 1: score += 30
-            score += news_check["credible"] * 15
-            if "REAL" in gemini_result["verdict"]: score += 25
-            elif "FAKE" in gemini_result["verdict"]: score -= 35
+            if pred == 1: score += 35
+            score += news["credible"] * 12
+            if "REAL" in gemini["verdict"]: score += 30
+            elif "FAKE" in gemini["verdict"]: score -= 40
 
-            final_confidence = max(5, min(99, score))
+            confidence = max(10, min(99, score))
 
-        # === DISPLAY RESULT ===
-        if final_confidence >= 65:
-            st.success(f"REAL NEWS DETECTED | Confidence: {final_confidence:.1f}%")
-        elif final_confidence <= 40:
-            st.error(f"FAKE / MISLEADING NEWS | Fake Confidence: {100-final_confidence:.1f}%")
+        # === RESULT ===
+        if confidence >= 70:
+            st.balloons()
+            st.success(f"REAL NEWS • Confidence: {confidence:.1f}%")
+        elif confidence <= 40:
+            st.error(f"FAKE OR MISLEADING • Fake Confidence: {100-confidence:.1f}%")
         else:
-            st.warning(f"UNCERTAIN – Needs Manual Verification | Score: {final_confidence:.1f}%")
+            st.warning(f"UNCERTAIN • Score: {confidence:.1f}%")
 
         col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("ML Model", "Real" if prediction == 1 else "Fake", f"{probability:.0f}%")
-        with col2:
-            st.metric("Trusted Sources Found", news_check["credible"])
-        with col3:
-            st.metric("Gemini AI", gemini_result["verdict"])
+        with col1: st.metric("ML Model", "Real" if pred==1 else "Fake", f"{prob:.0f}%")
+        with col2: st.metric("Trusted Sources", news["credible"])
+        with col3: st.metric("Gemini AI", gemini["verdict"])
 
-        if gemini_result["reason"]:
-            st.info(f"Gemini Reasoning: {gemini_result['reason']}")
+        st.info(f"Gemini: {gemini['reason']}")
 
-        if news_check["results"]:
-            st.success("Top Matching Articles from Trusted Sources:")
-            for item in news_check["results"][:3]:
-                title = item.get("title", "No title")
-                link = item.get("link", "#")
-                source = item.get("source", "Unknown")
-                st.markdown(f"• [{title}]({link}) — _{source}_")
+        if news["results"]:
+            st.success("Top Matching Articles:")
+            for r in news["results"][:3]:
+                st.markdown(f"• [{r.get('title','No title')}]({r.get('link','#')}) — _{r.get('source','')}_")
 
-st.markdown("---")
-st.caption("TruthLens Pro © 2025 | Powered by Logistic Regression + SerpAPI + Google Gemini | Always verify from original sources.")
+st.caption("TruthLens Pro © 2025 • Always verify from original sources")
