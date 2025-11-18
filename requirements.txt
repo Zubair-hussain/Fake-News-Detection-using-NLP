@@ -7,3 +7,6 @@ seaborn
 numpy
 tqdm
 kagglehub
+spacy
+google-generativeai
+requests
