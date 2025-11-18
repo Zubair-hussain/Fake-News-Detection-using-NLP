@@ -9,7 +9,7 @@ import google.generativeai as genai
 
 # =============== KEYS (WORKING) ===============
 SERPAPI_KEY = "46cba0dda74df8cb1aec4b685e0290209f5946f75d4e500ee602fa908e11ab8e"
-GEMINI_API_KEY = "AIzaSyAYYFPpYJdBL0HoW2g_hLE2X7UIs1K8Qfg"
+GEMINI_API_KEY = "AIzaSyC6x5u6uZPapmOdsf_Acw6ArschnMM5Cps"
 
 # =============== SETUP ===============
 nltk.download('stopwords', quiet=True)
