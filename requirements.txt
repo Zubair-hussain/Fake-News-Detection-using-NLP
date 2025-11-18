@@ -3,5 +3,5 @@ scikit-learn
 pandas
 nltk
 numpy
-google-generativeai
 requests
+PyPDF2
