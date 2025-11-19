@@ -132,10 +132,10 @@ def news_check(query):
                     "engine": "google", 
                     "q": query, 
                     "tbm": "nws", 
-                    "num": 20, 
+                    "num": 50, 
                     "start": start,
                     "api_key": key
-                }, timeout=8)
+                }, timeout=15)
                 
                 data = r.json()
                 results = data.get("news_results", [])
@@ -182,7 +182,7 @@ def gemini_check(text):
     )
     
     # Expanded model list to increase hit rate
-    models = ["gemini-1.5-flash", "gemini-1.5-flash-latest", "gemini-1.0-pro", "gemini-pro"]
+    models = ["gemini-2.5-flash", "gemini-1.5-flash", "gemini-1.5-flash-latest", "gemini-1.0-pro", "gemini-pro"]
     
     last_error = ""
     
