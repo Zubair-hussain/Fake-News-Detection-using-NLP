@@ -33,18 +33,8 @@ def setup_nltk():
 stop_words = setup_nltk()
 ps = PorterStemmer()
 
-# Gemini AI Setup (Standard SDK)
+# Gemini AI Configuration
 genai.configure(api_key=GEMINI_API_KEY)
-gemini_model = genai.GenerativeModel(
-    "gemini-1.5-flash", 
-    generation_config={"temperature": 0, "max_output_tokens": 50},
-    safety_settings=[
-        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-    ]
-)
 
 # ==================== MODEL LOADING (With Fallback) ====================
 class MockModel:
@@ -145,54 +135,78 @@ def news_check(query):
     verdict = "REAL" if count >= 2 else "FAKE"
     return {"verdict": verdict, "confidence": confidence, "source": "Trusted News", "articles": hits}
 
-# ==================== GEMINI CHECK (ROBUST) ====================
+# ==================== GEMINI CHECK (ROBUST RETRY) ====================
 def gemini_check(text):
     if not GEMINI_API_KEY:
         return {"verdict": "SKIPPED", "confidence": 0, "source": "Key Missing", "reason": "No Key"}
 
     prompt = f"Is this news real or fake? Answer only: REAL or FAKE. Text: {' '.join(text.split()[:600])}"
     
-    # METHOD 1: Try Standard SDK
-    try:
-        response = gemini_model.generate_content(prompt)
-        if not response.parts:
-             raise ValueError("Blocked")
-        result = response.text.strip().upper()
-        return {"verdict": "REAL" if "REAL" in result else "FAKE", "confidence": 90, "source": "Gemini AI", "reason": result[:50]}
-    except Exception as sdk_error:
-        print(f"SDK Failed ({sdk_error}), trying REST fallback...")
+    # List of models to try in order. 
+    # If 1.5-flash gives 404, it will automatically try gemini-pro
+    candidate_models = ["gemini-1.5-flash", "gemini-pro"]
+    
+    last_error = ""
 
-        # METHOD 2: Direct REST API Fallback (Bypasses SDK/GRPC issues)
+    for model_name in candidate_models:
+        # --- Attempt 1: Standard SDK ---
         try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
-            payload = {
-                "contents": [{"parts": [{"text": prompt}]}],
-                "safetySettings": [
+            model = genai.GenerativeModel(
+                model_name, 
+                generation_config={"temperature": 0, "max_output_tokens": 50},
+                safety_settings=[
                     {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
                     {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
                     {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
                     {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
                 ]
-            }
-            headers = {'Content-Type': 'application/json'}
-            response = requests.post(url, json=payload, headers=headers, timeout=10)
+            )
+            response = model.generate_content(prompt)
+            if not response.parts:
+                raise ValueError("Blocked by Safety")
+            result = response.text.strip().upper()
+            return {"verdict": "REAL" if "REAL" in result else "FAKE", "confidence": 90, "source": f"Gemini ({model_name})", "reason": result[:50]}
+        
+        except Exception as sdk_error:
+            # print(f"SDK failed for {model_name}: {sdk_error}") # Debug
             
-            if response.status_code == 200:
-                data = response.json()
-                if "candidates" in data and data["candidates"]:
-                    result = data["candidates"][0]["content"]["parts"][0]["text"].strip().upper()
-                    return {"verdict": "REAL" if "REAL" in result else "FAKE", "confidence": 90, "source": "Gemini AI (REST)", "reason": result[:50]}
+            # --- Attempt 2: Direct REST API (Fallback) ---
+            try:
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
+                payload = {
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "safetySettings": [
+                        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
+                    ]
+                }
+                headers = {'Content-Type': 'application/json'}
+                response = requests.post(url, json=payload, headers=headers, timeout=10)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    if "candidates" in data and data["candidates"]:
+                        result = data["candidates"][0]["content"]["parts"][0]["text"].strip().upper()
+                        return {"verdict": "REAL" if "REAL" in result else "FAKE", "confidence": 90, "source": f"Gemini ({model_name})", "reason": result[:50]}
+                    else:
+                        # Blocked but 200 OK
+                        continue 
+                elif response.status_code == 404:
+                    # Model not found, loop to next model in list
+                    last_error = f"404 on {model_name}"
+                    continue 
                 else:
-                    return {"verdict": "UNCERTAIN", "confidence": 0, "source": "Gemini Blocked", "reason": "Safety Filter"}
-            else:
-                error_reason = f"HTTP {response.status_code}"
-                if response.status_code == 400: error_reason = "Bad Request (Check Key)"
-                if response.status_code == 403: error_reason = "Forbidden (Invalid Key)"
-                if response.status_code == 429: error_reason = "Quota Exceeded"
-                return {"verdict": "FAKE", "confidence": 0, "source": "Gemini Error", "reason": error_reason}
+                    last_error = f"HTTP {response.status_code}"
+                    continue
+                    
+            except Exception as rest_error:
+                last_error = str(rest_error)
+                continue
 
-        except Exception as rest_error:
-            return {"verdict": "FAKE", "confidence": 0, "source": "Gemini Unavailable", "reason": str(rest_error)[:30]}
+    # If loop finishes without returning
+    return {"verdict": "FAKE", "confidence": 0, "source": "Gemini Unavailable", "reason": f"All models failed. Last: {last_error}"}
 
 # ==================== FINAL DECISION ====================
 def final_decision(ml, news, gemini):
