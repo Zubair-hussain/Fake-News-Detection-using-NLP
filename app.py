@@ -76,10 +76,9 @@ def extract_keywords(text):
     # otherwise fall back to long words.
     
     # 1. Try to find proper nouns (simple heuristic: capitalized words in middle of sentences)
-    # (Note: simple heuristic since we don't have full NLP pipeline loaded)
     entities = re.findall(r'\b[A-Z][a-z]+\b', text)
     if len(entities) > 3:
-        # Use unique entities, prioritize top 5
+        # Use unique entities, prioritize top 8
         return " ".join(list(set(entities))[:8])
     
     # 2. Fallback to original long-word logic
@@ -121,33 +120,55 @@ def ml_check(text):
     except Exception:
         return {"verdict": "UNCERTAIN", "confidence": 50.0, "source": "ML Error"}
 
-# ==================== NEWS CHECK (Grounding) ====================
+# ==================== NEWS CHECK (Multi-Page Fetch) ====================
 @st.cache_data(ttl=900)
 def news_check(query):
-    # Logic Update: Expanded source list for less bias
+    # Logic Update: Significantly expanded source list to reduce bias
     trusted_sources = {
         "cnn", "bbc", "reuters", "nytimes", "apnews", "theguardian", "npr", 
         "aljazeera", "wsj", "bloomberg", "forbes", "usatoday", "dw", "france24", 
-        "snopes", "politifact", "factcheck", "washingtonpost", "abc", "nbc", "cbs"
+        "snopes", "politifact", "factcheck", "washingtonpost", "abc", "nbc", "cbs",
+        "cnbc", "fox", "msnbc", "time", "slate", "politico", "marketwatch", "yahoo",
+        "vice", "vox", "axios", "huffpost", "newyorker", "economist", "financial times", "wikipedia"
     }
 
     def fetch_serpapi(key):
-        try:
-            r = requests.get("https://serpapi.com/search.json", params={
-                "engine": "google", "q": query, "tbm": "nws", "num": 10, "api_key": key
-            }, timeout=6)
-            data = r.json()
-            results = data.get("news_results", [])
-            # Check if source name contains trusted string OR if trusted string is in the link
-            hits = []
-            for res in results:
-                src = res.get("source", "").lower()
-                link = res.get("link", "").lower()
-                if any(t in src for t in trusted_sources) or any(t in link for t in trusted_sources):
-                    hits.append(res)
-            return hits
-        except:
-            return []
+        all_hits = []
+        # Logic Update: Fetch multiple pages to reduce bias/echo chamber
+        # We fetch 2 batches of 20 results (total 40 potential articles)
+        offsets = [0, 20] 
+        
+        for start in offsets:
+            try:
+                r = requests.get("https://serpapi.com/search.json", params={
+                    "engine": "google", 
+                    "q": query, 
+                    "tbm": "nws", 
+                    "num": 20, # Fetch 20 results per request
+                    "start": start,
+                    "api_key": key
+                }, timeout=8)
+                
+                data = r.json()
+                results = data.get("news_results", [])
+                
+                if not results:
+                    break
+
+                # Filter and deduplicate
+                for res in results:
+                    src = res.get("source", "").lower()
+                    link = res.get("link", "").lower()
+                    
+                    # Check against trusted list
+                    if any(t in src for t in trusted_sources) or any(t in link for t in trusted_sources):
+                        # Avoid duplicates across pages
+                        if res.get("link") not in [h.get("link") for h in all_hits]:
+                            all_hits.append(res)
+            except:
+                continue # Try next page even if one fails
+                
+        return all_hits
 
     hits = fetch_serpapi(SERPAPI_KEY)
     if not hits:
@@ -155,18 +176,15 @@ def news_check(query):
 
     count = len(hits)
     
-    # Logic Update: Confidence Calculation
-    # 0 hits = 10% confidence (Could be real but obscure)
-    # 1 hit = 40% confidence
-    # 2+ hits = High confidence
+    # Logic Update: Confidence Calculation based on higher volume
     if count == 0:
         confidence = 10
         verdict = "UNCERTAIN"
-    elif count == 1:
+    elif count < 3:
         confidence = 45
         verdict = "LIKELY REAL"
     else:
-        confidence = min(95, 40 + (count * 20))
+        confidence = min(95, 50 + (count * 10))
         verdict = "REAL"
 
     return {"verdict": verdict, "confidence": confidence, "source": "Trusted News", "articles": hits}
@@ -185,7 +203,7 @@ def gemini_check(text):
         f"Text: {' '.join(text.split()[:800])}"
     )
     
-    models = ["gemini-2.5-flash", "gemini-1.5-flash", "gemini-1.0-pro", "gemini-pro"]
+    models = ["gemini-1.5-flash", "gemini-1.0-pro", "gemini-pro"]
     
     for model in models:
         try:
