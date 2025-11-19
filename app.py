@@ -11,7 +11,7 @@ import pandas as pd
 from io import BytesIO
 
 # ==================== KEYS ====================
-SERPAPI_KEY = "46cba0dda74df8cb1aec4b685e0290209f5946f75d4e500ee602fa908e11ab8e"
+SERPAPI_KEY = "49d04639f5bb0673cfff09228f9f63963b592a93cb2f08d822c166075c9e3f12"
 SERPAPI_SECONDARY_KEY = "egHmGsoxyyUSn1kmNrz6d8zG"
 GEMINI_API_KEY = "AIzaSyBkq0VS1Jz8LCiBG9UzUhxAgUOruVffu2s"
 
