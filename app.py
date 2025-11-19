@@ -135,78 +135,73 @@ def news_check(query):
     verdict = "REAL" if count >= 2 else "FAKE"
     return {"verdict": verdict, "confidence": confidence, "source": "Trusted News", "articles": hits}
 
-# ==================== GEMINI CHECK (ROBUST RETRY) ====================
+# ==================== GEMINI CHECK (AUTO-DISCOVERY) ====================
+def get_available_model(api_key):
+    """Dynamically finds a working model for the key"""
+    try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+        response = requests.get(url, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            # Find first model that supports generateContent
+            for m in data.get('models', []):
+                if 'generateContent' in m.get('supportedGenerationMethods', []) and 'gemini' in m.get('name', ''):
+                    return m['name'].split('/')[-1] # Return just the name, e.g., "gemini-1.5-flash"
+    except:
+        pass
+    return "gemini-pro" # Ultimate fallback
+
 def gemini_check(text):
     if not GEMINI_API_KEY:
         return {"verdict": "SKIPPED", "confidence": 0, "source": "Key Missing", "reason": "No Key"}
 
     prompt = f"Is this news real or fake? Answer only: REAL or FAKE. Text: {' '.join(text.split()[:600])}"
     
-    # List of models to try in order. 
-    # If 1.5-flash gives 404, it will automatically try gemini-pro
-    candidate_models = ["gemini-1.5-flash", "gemini-pro"]
+    # 1. List of preferred models
+    candidate_models = ["gemini-1.5-flash", "gemini-pro", "gemini-1.0-pro", "gemini-1.5-pro"]
     
+    # 2. Try to auto-discover if previous attempts failed
+    discovered_model = get_available_model(GEMINI_API_KEY)
+    if discovered_model not in candidate_models:
+        candidate_models.insert(0, discovered_model) # Try the discovered one first
+
     last_error = ""
 
     for model_name in candidate_models:
-        # --- Attempt 1: Standard SDK ---
         try:
-            model = genai.GenerativeModel(
-                model_name, 
-                generation_config={"temperature": 0, "max_output_tokens": 50},
-                safety_settings=[
+            # Direct REST API is often more robust for simple scripts than SDK
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
+            payload = {
+                "contents": [{"parts": [{"text": prompt}]}],
+                "safetySettings": [
                     {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
                     {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
                     {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
                     {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
                 ]
-            )
-            response = model.generate_content(prompt)
-            if not response.parts:
-                raise ValueError("Blocked by Safety")
-            result = response.text.strip().upper()
-            return {"verdict": "REAL" if "REAL" in result else "FAKE", "confidence": 90, "source": f"Gemini ({model_name})", "reason": result[:50]}
-        
-        except Exception as sdk_error:
-            # print(f"SDK failed for {model_name}: {sdk_error}") # Debug
+            }
+            headers = {'Content-Type': 'application/json'}
+            response = requests.post(url, json=payload, headers=headers, timeout=8)
             
-            # --- Attempt 2: Direct REST API (Fallback) ---
-            try:
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
-                payload = {
-                    "contents": [{"parts": [{"text": prompt}]}],
-                    "safetySettings": [
-                        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-                        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-                        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-                        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
-                    ]
-                }
-                headers = {'Content-Type': 'application/json'}
-                response = requests.post(url, json=payload, headers=headers, timeout=10)
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    if "candidates" in data and data["candidates"]:
-                        result = data["candidates"][0]["content"]["parts"][0]["text"].strip().upper()
-                        return {"verdict": "REAL" if "REAL" in result else "FAKE", "confidence": 90, "source": f"Gemini ({model_name})", "reason": result[:50]}
-                    else:
-                        # Blocked but 200 OK
-                        continue 
-                elif response.status_code == 404:
-                    # Model not found, loop to next model in list
-                    last_error = f"404 on {model_name}"
-                    continue 
+            if response.status_code == 200:
+                data = response.json()
+                if "candidates" in data and data["candidates"]:
+                    result = data["candidates"][0]["content"]["parts"][0]["text"].strip().upper()
+                    return {"verdict": "REAL" if "REAL" in result else "FAKE", "confidence": 90, "source": f"Gemini ({model_name})", "reason": result[:50]}
                 else:
-                    last_error = f"HTTP {response.status_code}"
-                    continue
-                    
-            except Exception as rest_error:
-                last_error = str(rest_error)
+                    continue # Blocked
+            elif response.status_code == 404:
+                last_error = f"404 ({model_name})"
+                continue # Model not found, try next
+            else:
+                last_error = f"{response.status_code}"
                 continue
+                    
+        except Exception as e:
+            last_error = str(e)
+            continue
 
-    # If loop finishes without returning
-    return {"verdict": "FAKE", "confidence": 0, "source": "Gemini Unavailable", "reason": f"All models failed. Last: {last_error}"}
+    return {"verdict": "FAKE", "confidence": 0, "source": "Gemini Unavailable", "reason": f"Failed: {last_error}"}
 
 # ==================== FINAL DECISION ====================
 def final_decision(ml, news, gemini):
