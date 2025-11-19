@@ -23,7 +23,7 @@ ps = PorterStemmer()
 # Gemini AI
 genai.configure(api_key=GEMINI_API_KEY)
 gemini_model = genai.GenerativeModel(
-    "gemini-1.5-flash",
+    "gemini-2.5-flash",
     generation_config={"temperature": 0, "max_output_tokens": 50},
     safety_settings=[{"category": cat, "threshold": "BLOCK_NONE"} for cat in genai.types.HarmCategory]
 )
