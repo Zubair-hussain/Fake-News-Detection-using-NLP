@@ -13,7 +13,7 @@ from io import BytesIO
 # ==================== KEYS ====================
 SERPAPI_KEY = "49d04639f5bb0673cfff09228f9f63963b592a93cb2f08d822c166075c9e3f12"
 SERPAPI_SECONDARY_KEY = "egHmGsoxyyUSn1kmNrz6d8zG"
-GEMINI_API_KEY = "AIzaSyBkq0VS1Jz8LCiBG9UzUhxAgUOruVffu2s"
+GEMINI_API_KEY = "AIzaSyAYYFPpYJdBL0HoW2g_hLE2X7UIs1K8Qfg"
 
 # ==================== SETUP ====================
 nltk.download('stopwords', quiet=True)
