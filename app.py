@@ -72,16 +72,11 @@ def preprocess(text):
     return ' '.join([ps.stem(w) for w in text.split() if w not in stop_words and len(w) > 2])
 
 def extract_keywords(text):
-    # Logic Update: Prioritize Capitalized words (Named Entities) if possible, 
-    # otherwise fall back to long words.
-    
-    # 1. Try to find proper nouns (simple heuristic: capitalized words in middle of sentences)
+    # Logic Update: Prioritize Capitalized words (Named Entities) if possible
     entities = re.findall(r'\b[A-Z][a-z]+\b', text)
     if len(entities) > 3:
-        # Use unique entities, prioritize top 8
         return " ".join(list(set(entities))[:8])
     
-    # 2. Fallback to original long-word logic
     words = re.findall(r'\b[a-z]{5,20}\b', text.lower())
     filtered = [w for w in words if w not in stop_words][:10]
     return " ".join(filtered) or "news article"
@@ -105,10 +100,7 @@ def read_pdf(file):
 def ml_check(text):
     try:
         clean = preprocess(text)
-        
-        # Logic Update: Identify if we are using Mock or Real
         if isinstance(vectorizer, MockVectorizer):
-             # Return Neutral 50% if no model is present
              return {"verdict": "UNCERTAIN", "confidence": 50.0, "source": "ML (Not Loaded)"}
         
         vec_text = vectorizer.transform([clean])
@@ -123,51 +115,40 @@ def ml_check(text):
 # ==================== NEWS CHECK (Multi-Page Fetch) ====================
 @st.cache_data(ttl=900)
 def news_check(query):
-    # Logic Update: Significantly expanded source list to reduce bias
     trusted_sources = {
         "cnn", "bbc", "reuters", "nytimes", "apnews", "theguardian", "npr", 
         "aljazeera", "wsj", "bloomberg", "forbes", "usatoday", "dw", "france24", 
         "snopes", "politifact", "factcheck", "washingtonpost", "abc", "nbc", "cbs",
         "cnbc", "fox", "msnbc", "time", "slate", "politico", "marketwatch", "yahoo",
-        "vice", "vox", "axios", "huffpost", "newyorker", "economist", "financial times", "wikipedia"
+        "vice", "vox", "axios", "huffpost", "newyorker", "economist", "financial times"
     }
 
     def fetch_serpapi(key):
         all_hits = []
-        # Logic Update: Fetch multiple pages to reduce bias/echo chamber
-        # We fetch 2 batches of 20 results (total 40 potential articles)
         offsets = [0, 20] 
-        
         for start in offsets:
             try:
                 r = requests.get("https://serpapi.com/search.json", params={
                     "engine": "google", 
                     "q": query, 
                     "tbm": "nws", 
-                    "num": 20, # Fetch 20 results per request
+                    "num": 20, 
                     "start": start,
                     "api_key": key
                 }, timeout=8)
                 
                 data = r.json()
                 results = data.get("news_results", [])
-                
-                if not results:
-                    break
+                if not results: break
 
-                # Filter and deduplicate
                 for res in results:
                     src = res.get("source", "").lower()
                     link = res.get("link", "").lower()
-                    
-                    # Check against trusted list
                     if any(t in src for t in trusted_sources) or any(t in link for t in trusted_sources):
-                        # Avoid duplicates across pages
                         if res.get("link") not in [h.get("link") for h in all_hits]:
                             all_hits.append(res)
             except:
-                continue # Try next page even if one fails
-                
+                continue 
         return all_hits
 
     hits = fetch_serpapi(SERPAPI_KEY)
@@ -175,8 +156,6 @@ def news_check(query):
         hits = fetch_serpapi(SERPAPI_SECONDARY_KEY)
 
     count = len(hits)
-    
-    # Logic Update: Confidence Calculation based on higher volume
     if count == 0:
         confidence = 10
         verdict = "UNCERTAIN"
@@ -189,12 +168,11 @@ def news_check(query):
 
     return {"verdict": verdict, "confidence": confidence, "source": "Trusted News", "articles": hits}
 
-# ==================== GEMINI CHECK (Nuanced Prompt) ====================
+# ==================== GEMINI CHECK (Smart Fallback) ====================
 def gemini_check(text):
     if not GEMINI_API_KEY:
         return {"score": 0, "confidence": 0, "source": "Key Missing", "reason": "No Key"}
 
-    # Logic Update: Changed prompt to ask for a SCORE (0-100) instead of Binary Real/Fake
     prompt = (
         f"Analyze the following news text for factual accuracy and credibility. "
         f"Provide a credibility score from 0 (Completely Fake/Fabricated) to 100 (Highly Credible/Verified). "
@@ -203,8 +181,12 @@ def gemini_check(text):
         f"Text: {' '.join(text.split()[:800])}"
     )
     
-    models = ["gemini-1.5-flash", "gemini-1.0-pro", "gemini-pro"]
+    # Expanded model list to increase hit rate
+    models = ["gemini-1.5-flash", "gemini-1.5-flash-latest", "gemini-1.0-pro", "gemini-pro"]
     
+    last_error = ""
+    
+    # 1. Try API Models
     for model in models:
         try:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
@@ -213,15 +195,12 @@ def gemini_check(text):
                 "safetySettings": [{"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"}]
             }
             headers = {'Content-Type': 'application/json'}
-            response = requests.post(url, json=payload, headers=headers, timeout=8)
+            response = requests.post(url, json=payload, headers=headers, timeout=6)
             
             if response.status_code == 200:
                 data = response.json()
                 if "candidates" in data and data["candidates"]:
                     raw_text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-                    
-                    # Parse the Score
-                    # Looking for "Score: 85" pattern
                     score_match = re.search(r"Score:\s*(\d+)", raw_text, re.IGNORECASE)
                     reason_match = re.search(r"Reason:\s*(.*)", raw_text, re.IGNORECASE)
                     
@@ -229,39 +208,63 @@ def gemini_check(text):
                     reason = reason_match.group(1) if reason_match else raw_text[:100]
                     
                     return {
-                        "score": score,  # 0 to 100
-                        "confidence": 90, # High confidence in the AI's analysis capability
+                        "score": score, 
+                        "confidence": 90, 
                         "source": f"Gemini ({model})", 
                         "reason": reason
                     }
-        except:
+            else:
+                last_error = f"{response.status_code}"
+        except Exception as e:
+            last_error = str(e)
             continue 
 
-    # Fallback heuristic
-    return {"score": 50, "confidence": 0, "source": "AI Offline", "reason": "Could not connect to AI."}
+    # 2. FAIL-SAFE: Local Keyword Heuristic
+    # If API fails, run this logic so user gets a result instead of an error.
+    st.toast(f"⚠️ AI API Unreachable ({last_error}). Using Offline Analysis.", icon="📡")
+    
+    suspicious_patterns = [
+        r"won't tell you", r"secret cure", r"big pharma", r"mainstream media", 
+        r"shocking truth", r"miracle", r"exposed", r"deep state", r"hoax", 
+        r"censored", r"viral video", r"believe it or not"
+    ]
+    
+    hits = []
+    lower_text = text.lower()
+    score_deduction = 0
+    
+    for pattern in suspicious_patterns:
+        if re.search(pattern, lower_text):
+            hits.append(pattern)
+            score_deduction += 15
+            
+    base_score = 85 # Assume innocent until proven guilty
+    final_heuristic_score = max(10, base_score - score_deduction)
+    
+    if hits:
+        reason = f"Suspicious language detected: {', '.join(hits[:3])}..."
+    else:
+        reason = "No sensationalist clickbait triggers found in text analysis."
 
-# ==================== FINAL DECISION (Weighted Logic) ====================
+    return {
+        "score": final_heuristic_score, 
+        "confidence": 60, 
+        "source": "AI Offline (Heuristic)", 
+        "reason": reason
+    }
+
+# ==================== FINAL DECISION ====================
 def final_decision(ml, news, gemini):
-    # 1. Normalize inputs to 0-100 scale representing "Probability of being REAL"
-    
-    # ML Score
     ml_prob = ml["confidence"] if ml["verdict"] == "REAL" else (100 - ml["confidence"])
-    
-    # News Score (Already scaled 0-100 in news_check)
     news_prob = news["confidence"]
-    
-    # Gemini Score (Already 0-100)
     gemini_prob = gemini.get("score", 50)
     
-    # 2. Apply Weights (Crucial for fixing bias)
-    # News (Evidence) > Gemini (Reasoning) > ML (Pattern)
     w_news = 0.50
     w_gemini = 0.30
     w_ml = 0.20
     
     final_score = (news_prob * w_news) + (gemini_prob * w_gemini) + (ml_prob * w_ml)
     
-    # 3. Determine Verdict
     if final_score >= 75:
         verdict = "REAL"
         risk_label = "Verified Authentic"
@@ -326,16 +329,12 @@ if st.button("🔍 Analyze Truth", type="primary", use_container_width=True):
         st.error("Please provide text or PDF.")
     else:
         with st.spinner("Triangulating sources (ML + Search + AI)..."):
-            # 1. Run Checks
             ml = ml_check(text_input)
             query = extract_keywords(text_input)
             news = news_check(query)
             gemini = gemini_check(text_input)
-            
-            # 2. Final Logic
             result = final_decision(ml, news, gemini)
             
-            # 3. Save History
             st.session_state.history.append({
                 "Verdict": result["verdict"],
                 "Score": f"{result['final_score']:.1f}%",
@@ -343,7 +342,6 @@ if st.button("🔍 Analyze Truth", type="primary", use_container_width=True):
                 "AI Reason": gemini["reason"][:50]+"..."
             })
 
-        # 4. Display Result
         res_class = "res-real" if result["final_score"] > 60 else ("res-uncertain" if result["final_score"] > 40 else "res-fake")
         
         st.markdown(f"""
@@ -356,11 +354,14 @@ if st.button("🔍 Analyze Truth", type="primary", use_container_width=True):
 
         col1, col2, col3 = st.columns(3)
         col1.metric("Trusted Sources", f"{len(news['articles'])} Fnd", delta=f"{result['details']['News']:.0f} Score")
-        col2.metric("AI Analysis", f"{result['details']['AI']:.0f}/100", help="Gemini's assessment of credibility")
+        col2.metric("AI Analysis", f"{result['details']['AI']:.0f}/100", help=f"Source: {gemini['source']}")
         col3.metric("Pattern Match", f"{result['details']['ML']:.0f}/100", help="ML Stylometric analysis")
 
-        if gemini.get("reason") and "AI Offline" not in gemini["source"]:
-            st.info(f"**Gemini Insight**: {gemini['reason']}")
+        if gemini.get("reason"):
+            if "AI Offline" in gemini["source"]:
+                st.warning(f"**Offline Analysis**: {gemini['reason']}")
+            else:
+                st.info(f"**Gemini Insight**: {gemini['reason']}")
         
         if result["articles"]:
             st.markdown("### 📰 Corroborating Sources")
