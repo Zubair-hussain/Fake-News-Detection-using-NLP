@@ -10,15 +10,15 @@ import PyPDF2
 import pandas as pd
 from io import BytesIO
 import os
+import json
 
 # ==================== CONFIGURATION ====================
-# NOTE: Replace these with your actual keys. 
-# Ideally, use st.secrets in a production environment.
+# Keys provided by user
 SERPAPI_KEY = "49d04639f5bb0673cfff09228f9f63963b592a93cb2f08d822c166075c9e3f12"
 SERPAPI_SECONDARY_KEY = "egHmGsoxyyUSn1kmNrz6d8zG"
 GEMINI_API_KEY = "AIzaSyAYYFPpYJdBL0HoW2g_hLE2X7UIs1K8Qfg"
 
-# Set page config first
+# Set page config
 st.set_page_config(page_title="TruthLens Pro", page_icon="🔒", layout="centered")
 
 # ==================== SETUP ====================
@@ -33,19 +33,23 @@ def setup_nltk():
 stop_words = setup_nltk()
 ps = PorterStemmer()
 
-# Gemini AI Setup
-# CHANGED: Switched to 'gemini-1.5-flash' which is the current stable version for public API
+# Gemini AI Setup (Standard SDK)
 genai.configure(api_key=GEMINI_API_KEY)
 gemini_model = genai.GenerativeModel(
     "gemini-1.5-flash", 
     generation_config={"temperature": 0, "max_output_tokens": 50},
-    safety_settings=[{"category": cat, "threshold": "BLOCK_NONE"} for cat in genai.types.HarmCategory]
+    safety_settings=[
+        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+    ]
 )
 
 # ==================== MODEL LOADING (With Fallback) ====================
 class MockModel:
     """Fallback class if pkl files are missing"""
-    def predict(self, x): return [1] # Default to Real
+    def predict(self, x): return [1] 
     def predict_proba(self, x): 
         class Proba:
             def max(self): return 0.75
@@ -57,14 +61,12 @@ class MockVectorizer:
 
 @st.cache_resource
 def load_model():
-    # Try to load the actual models, otherwise use Mock models to prevent crash
     try:
         if os.path.exists("logistic_model.pkl") and os.path.exists("tfidf_vectorizer.pkl"):
             model = pickle.load(open("logistic_model.pkl", "rb"))
             vectorizer = pickle.load(open("tfidf_vectorizer.pkl", "rb"))
             return model, vectorizer
         else:
-            st.warning("⚠️ ML Model files (.pkl) not found. Using Simulation Mode for ML checks.")
             return MockModel(), MockVectorizer()
     except Exception as e:
         st.error(f"Error loading models: {e}")
@@ -107,8 +109,6 @@ def read_pdf(file):
 def ml_check(text):
     try:
         clean = preprocess(text)
-        # Check if we are using the real vectorizer (which has a transform method that returns a matrix)
-        # or the mock one.
         if isinstance(vectorizer, MockVectorizer):
              return {"verdict": "REAL", "confidence": 75.0, "source": "ML Model (Simulated)"}
         
@@ -116,31 +116,28 @@ def ml_check(text):
         pred = model.predict(vec_text)[0]
         prob = model.predict_proba(vec_text)[0].max() * 100
         return {"verdict": "REAL" if pred == 1 else "FAKE", "confidence": round(prob, 1), "source": "ML Model"}
-    except Exception as e:
-        print(f"ML Error: {e}")
+    except Exception:
         return {"verdict": "UNCERTAIN", "confidence": 50.0, "source": "ML Model Error"}
 
-# ==================== NEWS CHECK (Dual API) ====================
+# ==================== NEWS CHECK ====================
 @st.cache_data(ttl=900)
 def news_check(query):
     trusted_sources = {"cnn", "bbc", "reuters", "nytimes", "apnews", "theguardian", "npr", "aljazeera", "wsj"}
 
     def fetch_serpapi(key):
-        if "YOUR_" in key: return [] # Skip if key is placeholder
         try:
             r = requests.get("https://serpapi.com/search.json", params={
                 "engine": "google", "q": query, "tbm": "nws", "num": 10, "api_key": key
-            }, timeout=12)
+            }, timeout=10)
             data = r.json()
             results = data.get("news_results", [])
             hits = [res for res in results if any(t in res.get("source", "").lower() for t in trusted_sources)]
             return hits
-        except Exception as e:
-            print(f"SerpApi Error: {e}")
+        except:
             return []
 
     hits = fetch_serpapi(SERPAPI_KEY)
-    if not hits and "YOUR_" not in SERPAPI_SECONDARY_KEY:
+    if not hits:
         hits = fetch_serpapi(SERPAPI_SECONDARY_KEY)
 
     count = len(hits)
@@ -148,45 +145,63 @@ def news_check(query):
     verdict = "REAL" if count >= 2 else "FAKE"
     return {"verdict": verdict, "confidence": confidence, "source": "Trusted News", "articles": hits}
 
-# ==================== GEMINI CHECK ====================
+# ==================== GEMINI CHECK (ROBUST) ====================
 def gemini_check(text):
-    if "YOUR_" in GEMINI_API_KEY:
-        return {"verdict": "SKIPPED", "confidence": 0, "source": "Gemini Key Missing", "reason": "Add API Key"}
+    if not GEMINI_API_KEY:
+        return {"verdict": "SKIPPED", "confidence": 0, "source": "Key Missing", "reason": "No Key"}
 
     prompt = f"Is this news real or fake? Answer only: REAL or FAKE. Text: {' '.join(text.split()[:600])}"
+    
+    # METHOD 1: Try Standard SDK
     try:
-        # Calling the API
         response = gemini_model.generate_content(prompt)
-        
-        if not response.text:
-            raise ValueError("Empty response from Gemini")
-            
+        if not response.parts:
+             raise ValueError("Blocked")
         result = response.text.strip().upper()
-        verdict = "REAL" if "REAL" in result else "FAKE"
-        return {"verdict": verdict, "confidence": 90, "source": "Gemini AI", "reason": result[:50]}
-    except Exception as e:
-        # We capture the specific error here to display it in the UI or console
-        error_msg = str(e)
-        print(f"Gemini API Error: {error_msg}") 
-        
-        reason = "API Error"
-        if "403" in error_msg: reason = "Invalid Key"
-        elif "429" in error_msg: reason = "Quota Exceeded"
-        elif "not found" in error_msg.lower(): reason = "Model Not Found"
-        
-        return {"verdict": "FAKE", "confidence": 0, "source": "Gemini Unavailable", "reason": reason}
+        return {"verdict": "REAL" if "REAL" in result else "FAKE", "confidence": 90, "source": "Gemini AI", "reason": result[:50]}
+    except Exception as sdk_error:
+        print(f"SDK Failed ({sdk_error}), trying REST fallback...")
+
+        # METHOD 2: Direct REST API Fallback (Bypasses SDK/GRPC issues)
+        try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+            payload = {
+                "contents": [{"parts": [{"text": prompt}]}],
+                "safetySettings": [
+                    {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                    {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
+                ]
+            }
+            headers = {'Content-Type': 'application/json'}
+            response = requests.post(url, json=payload, headers=headers, timeout=10)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if "candidates" in data and data["candidates"]:
+                    result = data["candidates"][0]["content"]["parts"][0]["text"].strip().upper()
+                    return {"verdict": "REAL" if "REAL" in result else "FAKE", "confidence": 90, "source": "Gemini AI (REST)", "reason": result[:50]}
+                else:
+                    return {"verdict": "UNCERTAIN", "confidence": 0, "source": "Gemini Blocked", "reason": "Safety Filter"}
+            else:
+                error_reason = f"HTTP {response.status_code}"
+                if response.status_code == 400: error_reason = "Bad Request (Check Key)"
+                if response.status_code == 403: error_reason = "Forbidden (Invalid Key)"
+                if response.status_code == 429: error_reason = "Quota Exceeded"
+                return {"verdict": "FAKE", "confidence": 0, "source": "Gemini Error", "reason": error_reason}
+
+        except Exception as rest_error:
+            return {"verdict": "FAKE", "confidence": 0, "source": "Gemini Unavailable", "reason": str(rest_error)[:30]}
 
 # ==================== FINAL DECISION ====================
 def final_decision(ml, news, gemini):
-    # Handle cases where Gemini or ML might have failed (confidence 0)
-    gemini_conf = gemini["confidence"] if gemini["source"] != "Gemini Unavailable" else 0
+    gemini_conf = gemini["confidence"] if gemini["source"] != "Gemini Unavailable" and gemini["source"] != "Gemini Error" else 0
     
     real_score = ml["confidence"]*0.9 + news["confidence"] + (gemini_conf*1.2 if gemini_conf > 0 else 0)
     fake_score = (100-ml["confidence"])*0.9 + (100-news["confidence"]) + (100-gemini_conf)*1.2
     
     winner = "REAL" if real_score > fake_score else "FAKE"
-    
-    # Prevent division by zero
     total_score = real_score + fake_score
     if total_score == 0: total_score = 1
         
@@ -265,10 +280,10 @@ if st.button("🔍 Analyze Truth", type="primary", use_container_width=True):
         col2.metric("Trusted Sources", len(news["articles"]))
         col3.metric("Gemini AI", gemini["verdict"], f"{gemini['confidence']:.0f}%")
 
-        if gemini.get("reason") and gemini["confidence"]>0:
+        if gemini.get("reason") and gemini["confidence"] > 0:
             st.info(f"**Gemini Insight**: {gemini['reason']}")
-        elif gemini["source"] == "Gemini Unavailable":
-             st.warning(f"**Gemini Unavailable**: {gemini['reason']}")
+        elif "Gemini" in gemini["source"] and gemini["confidence"] == 0:
+             st.warning(f"**Gemini Issue**: {gemini['reason']}")
 
         if result["articles"]:
             st.markdown('<div class="premium-card">', unsafe_allow_html=True)
